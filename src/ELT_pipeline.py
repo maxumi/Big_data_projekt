@@ -3,24 +3,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import os
 import pickle
-import logging
 from concurrent.futures import ProcessPoolExecutor
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-
-# Task 1: Extract Data from Original Datafile
-class ExtractDataFromFile(luigi.Task):
-    def output(self):
-        return luigi.LocalTarget('Data/Original/adult-depression-lghc-indicator-24.csv')
-    
-    def run(self):
-        if not self.output().exists():
-            raise FileNotFoundError(f"Expected file not found: {self.output().path}")
-
-# Helper functions for data transformation and pickle operations
-def transform_data(df, strata_type):
-    return df[df['Strata'] == strata_type].groupby(['Year', 'Strata Name'], as_index=False)['Percent'].mean()
-
+# Helper functions to save and load data as pickle files ("aka .pkl")
 def save_pickle(data, path):
     with open(path, 'wb') as f:
         pickle.dump(data, f)
@@ -30,6 +15,21 @@ def load_pickle(path):
         return pickle.load(f)
 
 
+# Task 1: Extract File and save it as temp
+class ExtractDataFromFile(luigi.Task):
+    def output(self):
+        return luigi.LocalTarget('Data/Temp/adult_depression_data.pkl')
+    
+    def run(self):
+        os.makedirs('Data/Temp', exist_ok=True)
+        df = pd.read_csv('Data/Original/adult-depression-lghc-indicator-24.csv')
+        save_pickle(df, self.output().path)
+
+# Helper functions for data transformation and pickle operations
+def transform_data(df, strata_type):
+    return df[df['Strata'] == strata_type].groupby(['Year', 'Strata Name'], as_index=False)['Percent'].mean()
+
+# Required as doing it ProcessPoolExecutor can cause issues
 def process_and_save(df, strata, strata_type, output_path):
     transformed_data = transform_data(df, strata_type)
     save_pickle(transformed_data, output_path)
@@ -44,13 +44,12 @@ class TransformDataByStrata(luigi.Task):
         return {strata: luigi.LocalTarget(f'Data/Temp/{strata}_data.pkl') for strata in strata_types}
 
     def run(self):
-        df = pd.read_csv(self.input().path)
+        # Load the extracted data using load_pickle
+        df = load_pickle(self.input().path)
 
         required_columns = {'Year', 'Strata', 'Strata Name'}
         if not required_columns.issubset(df.columns):
             raise ValueError(f"Input data missing columns: {required_columns - set(df.columns)}")
-
-        os.makedirs('Data/Temp', exist_ok=True)
 
         # Map strata to their corresponding transformation types
         strata_mapping = {
@@ -69,7 +68,11 @@ class TransformDataByStrata(luigi.Task):
                 for strata, strata_type in strata_mapping.items()
             ]
             for future in futures:
-                future.result() 
+                # Makes it wait until tasks are done
+                future.result()
+
+        # Remove the temporary extraction file after transformation
+        os.remove(self.input().path)
 
 # Task 3: Load Transformed Data into CSV Files
 class LoadTransformedData(luigi.Task):
